@@ -141,33 +141,78 @@ class MarzbanService
         }
 
         try {
-            $payload = [
-                'expire' => $userData['expire'],
-                'data_limit' => $userData['data_limit'],
-            ];
+            // Marzban's "modify user" endpoint (PUT /api/user/{username}) replaces
+            // every field it receives. Two important API behaviours:
+            //
+            //  1. Sending "proxies" makes Marzban delete every proxy that is NOT
+            //     listed and regenerate the settings (UUID/password) of the ones
+            //     that are listed with empty settings. Defaulting proxies here
+            //     would silently break the customer's existing config/subscription.
+            //  2. Sending "inbounds" with tags that do not exist in the panel's
+            //     xray config fails validation with a 422 error.
+            //
+            // Therefore only forward the fields the caller explicitly provided
+            // (for a renewal this is just "expire" and "data_limit"), so the
+            // user's existing proxies/inbounds stay untouched.
 
-            $proxies = $userData['proxies'] ?? [];
-            if (empty($proxies)) {
-                $proxies = [
-                    'shadowsocks' => new \stdClass(),
-                    'vless' => new \stdClass(),
-                    'vmess' => new \stdClass(),
-                ];
-            } 
+            $payload = [];
 
-            if (is_array($inbounds) && empty($inbounds)) {
-                $inbounds = new \stdClass();
-                $payload['inbounds'] = $inbounds;
+            if (array_key_exists('expire', $userData)) {
+                $payload['expire'] = $userData['expire'] === null ? null : (int) $userData['expire'];
             }
 
+            if (array_key_exists('data_limit', $userData)) {
+                $payload['data_limit'] = $userData['data_limit'] === null ? null : (int) $userData['data_limit'];
+            }
+
+            foreach (['data_limit_reset_strategy', 'status', 'note'] as $optionalKey) {
+                if (!empty($userData[$optionalKey])) {
+                    $payload[$optionalKey] = $userData[$optionalKey];
+                }
+            }
+
+            // Only include proxies/inbounds when the caller explicitly passed a
+            // non-empty value (never default them — see the note above).
+            if (!empty($userData['proxies']) && is_array($userData['proxies'])) {
+                $payload['proxies'] = $userData['proxies'];
+            }
+            if (!empty($userData['inbounds']) && is_array($userData['inbounds'])) {
+                $payload['inbounds'] = $userData['inbounds'];
+            }
+
+            if (empty($payload)) {
+                Log::warning('Marzban Update User skipped: empty payload.', ['username' => $username]);
+                return null;
+            }
+
+            $jsonPayload = json_encode($payload);
+
+            Log::info('Marzban Update User Payload (Raw JSON):', [
+                'url' => $this->baseUrl . "/api/user/{$username}",
+                'json_payload' => $jsonPayload,
+            ]);
+
             $response = Http::withToken($this->accessToken)
-                ->withHeaders(['Accept' => 'application/json'])
-                ->put($this->baseUrl . "/api/user/{$username}", $payload);
+                ->withHeaders([
+                    'Accept' => 'application/json',
+                    'Content-Type' => 'application/json',
+                ])
+                ->withBody($jsonPayload, 'application/json')
+                ->put($this->baseUrl . "/api/user/{$username}");
+
+            if (!$response->successful()) {
+                Log::error('Marzban Update User Failed:', [
+                    'username' => $username,
+                    'status' => $response->status(),
+                    'body' => $response->body(),
+                ]);
+                return null;
+            }
 
             Log::info('Marzban Update User Response:', $response->json() ?? ['raw' => $response->body()]);
             return $response->json();
         } catch (\Exception $e) {
-            Log::error('Marzban Update User Exception:', ['message' => $e->getMessage()]);
+            Log::error('Marzban Update User Exception:', ['message' => $e->getMessage(), 'username' => $username]);
             return null;
         }
     }
@@ -205,10 +250,19 @@ class MarzbanService
                 ->withHeaders(['Accept' => 'application/json'])
                 ->post($this->baseUrl . "/api/user/{$username}/reset");
 
+            if (!$response->successful()) {
+                Log::warning('Marzban Reset User Traffic Failed:', [
+                    'username' => $username,
+                    'status' => $response->status(),
+                    'body' => $response->body(),
+                ]);
+                return null;
+            }
+
             Log::info('Marzban Reset User Traffic Response:', $response->json() ?? ['raw' => $response->body()]);
             return $response->json();
         } catch (\Exception $e) {
-            Log::error('Marzban Reset User Traffic Exception:', ['message' => $e->getMessage()]);
+            Log::error('Marzban Reset User Traffic Exception:', ['message' => $e->getMessage(), 'username' => $username]);
             return null;
         }
     }

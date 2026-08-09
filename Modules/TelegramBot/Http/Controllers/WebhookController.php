@@ -4108,7 +4108,9 @@ class WebhookController extends BaseController
             $targetServer = $originalOrder->server_id ? \Modules\MultiServer\Models\Server::find($originalOrder->server_id) : null;
             if ($targetServer && $targetServer->is_active) {
                 $isMultiServer = true;
-                $panelType = $targetServer->type ?? 'xui';
+                $panelType = strtolower($targetServer->type ?? 'xui');
+                if ($panelType === 'sanaei') $panelType = 'xui';
+
                 $xuiHost = $targetServer->full_host;
                 $xuiUser = $targetServer->username;
                 $xuiPass = $targetServer->password;
@@ -4119,6 +4121,12 @@ class WebhookController extends BaseController
                 $pasarguardUser = $targetServer->username;
                 $pasarguardPass = $targetServer->password;
                 $pasarguardNode = $targetServer->pasarguard_node_hostname ?? $pasarguardHost;
+
+                // Marzban credentials for multi-server
+                $marzbanHost = $targetServer->full_host;
+                $marzbanUser = $targetServer->username;
+                $marzbanPass = $targetServer->password;
+                $marzbanNode = $targetServer->marzban_node_hostname ?? $marzbanHost;
             }
         }
 
@@ -4134,11 +4142,15 @@ class WebhookController extends BaseController
 
                 $updateResponse = $pasarguard->updateUser($uniqueUsername, [
                     'expire' => $newExpiryDate->timestamp,
-                    'data_limit' => $plan->volume_gb * 1073741824,
+                    'data_limit' => (int) ($plan->volume_gb * 1073741824),
                 ]);
+                // 🔥 ریست کردن ترافیک مصرفی — به‌صورت best-effort؛ تمدید نباید با خطای ریست شکست بخورد
                 $resetResponse = $pasarguard->resetUserTraffic($uniqueUsername);
+                if ($resetResponse === null) {
+                    Log::warning("PasarGuard traffic reset FAILED after renewal for user: $uniqueUsername");
+                }
 
-                if ($updateResponse !== null && $resetResponse !== null) {
+                if ($updateResponse !== null && (isset($updateResponse['username']) || isset($updateResponse['subscription_url']))) {
                     $originalOrder->update(['expires_at' => $newExpiryDate]);
                     return [
                         'link' => $originalOrder->config_details,
@@ -4157,21 +4169,50 @@ class WebhookController extends BaseController
                     $isMultiServer ? ($marzbanNode ?? '') : (string) $settings->get('marzban_node_hostname')
                 );
 
-                $updateResponse = $marzban->updateUser($uniqueUsername, [
+                $renewPayload = [
                     'expire' => $newExpiryDate->timestamp,
-                    'data_limit' => $plan->volume_gb * 1073741824,
-                ]);
-                $resetResponse = $marzban->resetUserTraffic($uniqueUsername);
+                    'data_limit' => (int) ($plan->volume_gb * 1073741824),
+                ];
 
-                if ($updateResponse !== null && $resetResponse !== null) {
-                    $originalOrder->update(['expires_at' => $newExpiryDate]);
+                $updateResponse = $marzban->updateUser($uniqueUsername, $renewPayload);
+
+                // اگر آپدیت ناموفق بود (مثلاً کاربر از پنل مرزبان حذف شده باشد)،
+                // کاربر را دوباره می‌سازیم تا تمدید از دست نرود.
+                $recreated = false;
+                if ($updateResponse === null) {
+                    Log::warning("Marzban renewal: update failed for {$uniqueUsername}, attempting to recreate the user.");
+                    $createResponse = $marzban->createUser(array_merge($renewPayload, ['username' => $uniqueUsername]));
+                    if ($createResponse !== null && isset($createResponse['username'])) {
+                        $recreated = true;
+                        $updateResponse = $createResponse;
+                    } else {
+                        return null;
+                    }
+                }
+
+                if ($recreated) {
+                    // کاربر از نو ساخته شد؛ لینک سابسکریپشن جدید را ذخیره کن
+                    $newLink = $marzban->generateSubscriptionLink($updateResponse) ?: $originalOrder->config_details;
+                    $originalOrder->update(['expires_at' => $newExpiryDate, 'config_details' => $newLink]);
                     return [
-                        'link' => $originalOrder->config_details,
+                        'link' => $newLink,
                         'username' => $uniqueUsername
                     ];
-                } else {
-                    return null;
                 }
+
+                // 🔥 ریست کردن ترافیک مصرفی (مهم برای تمدید) — best-effort، مثل مسیر X-UI
+                $resetResponse = $marzban->resetUserTraffic($uniqueUsername);
+                if ($resetResponse !== null) {
+                    Log::info("Marzban traffic reset successful for user: $uniqueUsername");
+                } else {
+                    Log::warning("Marzban traffic reset FAILED after renewal for user: $uniqueUsername");
+                }
+
+                $originalOrder->update(['expires_at' => $newExpiryDate]);
+                return [
+                    'link' => $originalOrder->config_details,
+                    'username' => $uniqueUsername
+                ];
             }
             // --- X-UI (SANAEI) ---
             elseif ($panelType === 'xui') {
@@ -5130,12 +5171,28 @@ class WebhookController extends BaseController
                     : ($order->panel_username ?? ClientNamingService::generate($user->id, $isRenewal ? $originalOrder->id : $order->id));
                 $uniqueUsername = trim($uniqueUsername);
 
-                $newExpiresAt = $isRenewal
-                    ? (new \DateTime($originalOrder->expires_at))->modify("+{$plan->duration_days} days")
-                    : now()->addDays($plan->duration_days);
+                if ($isRenewal) {
+                    // اگر سرویس منقضی شده باشد، تمدید از امروز حساب می‌شود (مثل مسیر کیف پول)
+                    $baseDate = $originalOrder->expires_at ? Carbon::parse($originalOrder->expires_at) : now();
+                    if ($baseDate->isPast()) {
+                        $baseDate = now();
+                    }
+                    $newExpiresAt = $baseDate->addDays($plan->duration_days);
+                } else {
+                    $newExpiresAt = now()->addDays($plan->duration_days);
+                }
 
                 // Determine panel/server
-                $panelType = $settings->get('panel_type');
+                $panelType = Setting::normalizeValue($settings->get('panel_type'));
+                if (empty($panelType)) {
+                    // اگر نوع پنل در تنظیمات ذخیره نشده، از روی مقادیر موجود حدس بزن
+                    $hasXui = !empty($settings->get('xui_host')) && !empty($settings->get('xui_user')) && !empty($settings->get('xui_pass'));
+                    $hasMarzban = !empty($settings->get('marzban_host'));
+                    $panelType = $hasXui ? 'xui' : ($hasMarzban ? 'marzban' : 'xui');
+                }
+                $panelType = strtolower((string) $panelType);
+                if ($panelType === 'sanaei') $panelType = 'xui';
+
                 $targetServer = null;
                 $targetServerId = $order->server_id;
                 if (!$targetServerId && $isRenewal && $originalOrder) {
@@ -5218,10 +5275,16 @@ class WebhookController extends BaseController
                         (string)($marzbanHost ?? ''), (string)($marzbanUser ?? ''),
                         (string)($marzbanPass ?? ''), (string)($marzbanNode ?? '')
                     );
-                    $userData = ['expire' => $newExpiresAt->getTimestamp(), 'data_limit' => $plan->volume_gb * 1073741824];
+                    $userData = ['expire' => $newExpiresAt->getTimestamp(), 'data_limit' => (int) ($plan->volume_gb * 1073741824)];
                     if ($isRenewal) {
                         $response = $marzban->updateUser($uniqueUsername, $userData);
-                        $marzban->resetUserTraffic($uniqueUsername);
+                        if ($response === null) {
+                            // اگر کاربر در پنل مرزبان پیدا نشد (مثلاً حذف شده باشد)، دوباره می‌سازیم
+                            Log::warning("Marzban renew (admin approve): update failed for {$uniqueUsername}, attempting to recreate the user.");
+                            $response = $marzban->createUser(array_merge($userData, ['username' => $uniqueUsername]));
+                        } else {
+                            $marzban->resetUserTraffic($uniqueUsername);
+                        }
                     } else {
                         $response = $marzban->createUser(array_merge($userData, ['username' => $uniqueUsername]));
                     }
