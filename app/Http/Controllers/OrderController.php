@@ -132,11 +132,29 @@ class OrderController extends Controller
 
     /**
      * Create a new pending order to renew an existing service.
+     * Allows the user to choose a different renewal package.
      */
-    public function renew(Order $order)
+    public function renew(Request $request, Order $order)
     {
         if (Auth::id() !== $order->user_id || $order->status !== 'paid') {
             abort(403);
+        }
+
+        $request->validate([
+            'plan_id' => 'nullable|exists:plans,id',
+        ]);
+
+        $renewPlan = null;
+        if ($request->filled('plan_id')) {
+            $renewPlan = Plan::where('id', $request->plan_id)->where('is_active', true)->first();
+            if (!$renewPlan) {
+                return redirect()->back()->with('error', 'پکیج انتخاب شده نامعتبر است.');
+            }
+        } else {
+            $renewPlan = $order->plan;
+            if (!$renewPlan) {
+                return redirect()->back()->with('error', 'پلن سرویس فعلی یافت نشد.');
+            }
         }
 
         $newOrder = $order->replicate();
@@ -146,15 +164,16 @@ class OrderController extends Controller
         $newOrder->config_details = null;
         $newOrder->expires_at = null;
         $newOrder->renews_order_id = $order->id;
+        $newOrder->plan_id = $renewPlan->id;
         $newOrder->discount_amount = 0;
         $newOrder->discount_code_id = null;
-        $newOrder->amount = $order->plan->price; // مبلغ اصلی بدون تخفیف
+        $newOrder->amount = $renewPlan->price;
         $newOrder->save();
 
         Auth::user()->notifications()->create([
             'type' => 'renewal_order_created',
             'title' => 'درخواست تمدید سرویس ثبت شد!',
-            'message' => "سفارش تمدید سرویس {$order->plan->name} با موفقیت ثبت شد و در انتظار پرداخت است.",
+            'message' => "سفارش تمدید سرویس {$renewPlan->name} با موفقیت ثبت شد و در انتظار پرداخت است.",
             'link' => route('order.show', $newOrder->id),
         ]);
 
