@@ -171,6 +171,20 @@ class SubscriptionImportService
         $existingOrder = Order::where('panel_client_id', $uuid)->where('status', 'paid')->first();
         if ($existingOrder) {
             if ($existingOrder->user_id === $user->id) {
+                // Telegram webhooks may be delivered more than once while the
+                // first (panel) request is still running.  Import is therefore
+                // idempotent for the Telegram flow: a retry should show the
+                // already-created service instead of turning a successful import
+                // into a misleading error.  Keep the old web/API response for
+                // callers that explicitly expect duplicate validation.
+                if ($source === 'telegram') {
+                    return [
+                        'success' => true,
+                        'order' => $existingOrder,
+                        'error' => null,
+                    ];
+                }
+
                 return [
                     'success' => false,
                     'order' => null,

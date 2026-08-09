@@ -1005,6 +1005,49 @@ class WebhookController extends BaseController
     {
         $input = trim($input);
 
+        // Telegram retries webhook updates when panel lookup takes long enough.
+        // Serialize imports per user/input and remember successful deliveries so
+        // the retry cannot send a second progress message or a duplicate error.
+        $cacheKey = 'telegram-import-complete:' . $user->id . ':' . hash('sha256', $input);
+        $lock = null;
+        try {
+            $cache = \Illuminate\Support\Facades\Cache::store();
+            if ($cache->has($cacheKey)) {
+                return;
+            }
+
+            $lock = $cache->lock('telegram-import-lock:' . $user->id . ':' . hash('sha256', $input), 180);
+            if (! $lock->get()) {
+                // The first webhook is still processing and will send the only
+                // progress/success response.
+                return;
+            }
+        } catch (\Throwable $e) {
+            // Import must remain available if a deployment has not provisioned
+            // the configured cache-lock backend yet.
+            Log::warning('Telegram import idempotency lock unavailable.', [
+                'user_id' => $user->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        try {
+            $this->performImportSubscription($user, $input, $messageId, $cacheKey);
+        } finally {
+            if ($lock) {
+                try {
+                    $lock->release();
+                } catch (\Throwable $e) {
+                    Log::debug('Could not release Telegram import lock.', ['error' => $e->getMessage()]);
+                }
+            }
+        }
+    }
+
+    protected function performImportSubscription(User $user, string $input, ?int $messageId = null, ?string $cacheKey = null)
+    {
+        $input = trim($input);
+
         if (empty($input)) {
             $this->showImportPrompt($user, $messageId);
             return;
@@ -1040,6 +1083,17 @@ class WebhookController extends BaseController
                 $order = $result['order'] ?? null;
                 if (! $order instanceof Order) {
                     throw new \UnexpectedValueException('Subscription import succeeded without an order.');
+                }
+
+                // Mark before sending the response: a Telegram webhook retry
+                // arriving during/after this call must not emit another progress
+                // message (or process the same subscription again).
+                if ($cacheKey) {
+                    try {
+                        \Illuminate\Support\Facades\Cache::put($cacheKey, $order->id, now()->addMinutes(10));
+                    } catch (\Throwable $e) {
+                        Log::debug('Could not cache completed Telegram import.', ['error' => $e->getMessage()]);
+                    }
                 }
 
                 // Do not let MarkdownV2 formatting turn an already imported account
