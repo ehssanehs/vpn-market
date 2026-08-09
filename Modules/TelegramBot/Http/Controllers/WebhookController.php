@@ -1570,12 +1570,22 @@ class WebhookController extends BaseController
         } elseif (Str::startsWith($data, 'renew_order_')) {
             $originalOrderId = (int) Str::after($data, 'renew_order_');
             $this->startRenewalPurchaseProcess($user, $originalOrderId, $messageId);
+        } elseif (Str::startsWith($data, 'renew_plan_')) {
+            $payload = Str::after($data, 'renew_plan_');
+            [$orderId, $planId] = array_pad(explode('_', $payload, 2), 2, null);
+            $this->showRenewPlanConfirmation($user, (int)$orderId, (int)$planId, $messageId);
         } elseif (Str::startsWith($data, 'renew_pay_wallet_')) {
-            $originalOrderId = (int) Str::after($data, 'renew_pay_wallet_');
-            $this->processRenewalWalletPayment($user, $originalOrderId, $messageId);
+            $payload = Str::after($data, 'renew_pay_wallet_');
+            $parts = explode('_', $payload);
+            $originalOrderId = (int) ($parts[0] ?? 0);
+            $planId = isset($parts[1]) ? (int)$parts[1] : null;
+            $this->processRenewalWalletPayment($user, $originalOrderId, $messageId, $planId);
         } elseif (Str::startsWith($data, 'renew_pay_card_')) {
-            $originalOrderId = (int) Str::after($data, 'renew_pay_card_');
-            $this->handleRenewCardPayment($user, $originalOrderId, $messageId);
+            $payload = Str::after($data, 'renew_pay_card_');
+            $parts = explode('_', $payload);
+            $originalOrderId = (int) ($parts[0] ?? 0);
+            $planId = isset($parts[1]) ? (int)$parts[1] : null;
+            $this->handleRenewCardPayment($user, $originalOrderId, $messageId, $planId);
         } elseif (Str::startsWith($data, 'deposit_amount_')) {
             $amount = (int) Str::after($data, 'deposit_amount_');
             $this->processDepositAmount($user, $amount, $messageId);
@@ -3862,28 +3872,61 @@ class WebhookController extends BaseController
     {
         $originalOrder = $user->orders()->with('plan')->find($originalOrderId);
 
-        if (!$originalOrder || !$originalOrder->plan || $originalOrder->status !== 'paid') {
+        if (!$originalOrder || $originalOrder->status !== 'paid') {
             $this->sendOrEditMainMenu($user->telegram_chat_id, "❌ سرویس مورد نظر برای تمدید یافت نشد یا معتبر نیست.", $messageId);
             return;
         }
 
-        $plan = $originalOrder->plan;
+        $plans = Plan::where('is_active', true)->orderBy('price')->get();
+        if ($plans->isEmpty()) {
+            $this->sendOrEditMainMenu($user->telegram_chat_id, "❌ هیچ پکیج فعالی برای تمدید یافت نشد.", $messageId);
+            return;
+        }
+
+        $currentPlanName = $originalOrder->plan ? $originalOrder->plan->name : 'نامشخص';
+        $message = "🔄 *انتخاب پکیج تمدید*\n\n";
+        $message .= "سرویس فعلی: *{$this->escape($currentPlanName)}*\n";
+        if ($originalOrder->expires_at) {
+            $message .= "تاریخ انقضا: *{$this->escape(to_jalali_date(Carbon::parse($originalOrder->expires_at), 'Y/m/d'))}*\n";
+        }
+        $message .= "\nلطفاً پکیج مورد نظر برای تمدید را انتخاب کنید:";
+
+        $keyboard = Keyboard::make()->inline();
+        foreach ($plans as $pl) {
+            $label = $pl->name . " — " . $pl->volume_gb . "GB / " . $pl->duration_days . "روز — " . number_format($pl->price) . "تومان";
+            $keyboard->row([Keyboard::inlineButton(['text' => $label, 'callback_data' => "renew_plan_{$originalOrderId}_{$pl->id}"])]);
+        }
+        $keyboard->row([Keyboard::inlineButton(['text' => '⬅️ بازگشت به سرویس‌ها', 'callback_data' => '/my_services'])]);
+
+        $this->sendOrEditMessage($user->telegram_chat_id, $message, $keyboard, $messageId);
+    }
+
+    protected function showRenewPlanConfirmation($user, $originalOrderId, $planId, $messageId)
+    {
+        $originalOrder = $user->orders()->with('plan')->find($originalOrderId);
+        $plan = Plan::where('id', $planId)->where('is_active', true)->first();
+
+        if (!$originalOrder || !$plan || $originalOrder->status !== 'paid') {
+            $this->sendOrEditMainMenu($user->telegram_chat_id, "❌ سرویس یا پکیج انتخاب شده یافت نشد.", $messageId);
+            return;
+        }
+
         $balance = $user->balance ?? 0;
-        $expiresAt = Carbon::parse($originalOrder->expires_at);
+        $expiresAt = $originalOrder->expires_at ? Carbon::parse($originalOrder->expires_at) : now();
 
         $message = "🔄 *تایید تمدید سرویس*\n\n";
-        $message .= "▫️ سرویس: *{$this->escape($plan->name)}*\n";
-        $message .= "▫️ تاریخ انقضای فعلی: *" . $this->escape(to_jalali_date($expiresAt, 'Y/m/d')) . "*\n";
-        $message .= "▫️ هزینه تمدید ({$plan->duration_days} روز): *" . number_format($plan->price) . " تومان*\n";
+        $message .= "▫️ سرویس فعلی: *{$this->escape($originalOrder->plan ? $originalOrder->plan->name : '—')}*\n";
+        $message .= "▫️ پکیج تمدید: *{$this->escape($plan->name)}* ({$plan->volume_gb}GB / {$plan->duration_days} روز)\n";
+        $message .= "▫️ هزینه تمدید: *" . number_format($plan->price) . " تومان*\n";
         $message .= "▫️ موجودی کیف پول: *" . number_format($balance) . " تومان*\n\n";
         $message .= "لطفاً روش پرداخت برای تمدید را انتخاب کنید:";
 
         $keyboard = Keyboard::make()->inline();
         if ($balance >= $plan->price) {
-            $keyboard->row([Keyboard::inlineButton(['text' => '✅ تمدید با کیف پول (آنی)', 'callback_data' => "renew_pay_wallet_{$originalOrderId}"])]);
+            $keyboard->row([Keyboard::inlineButton(['text' => '✅ تمدید با کیف پول (آنی)', 'callback_data' => "renew_pay_wallet_{$originalOrderId}_{$plan->id}"])]);
         }
-        $keyboard->row([Keyboard::inlineButton(['text' => '💳 تمدید با کارت به کارت', 'callback_data' => "renew_pay_card_{$originalOrderId}"])])
-            ->row([Keyboard::inlineButton(['text' => '⬅️ بازگشت به سرویس‌ها', 'callback_data' => '/my_services'])]);
+        $keyboard->row([Keyboard::inlineButton(['text' => '💳 تمدید با کارت به کارت', 'callback_data' => "renew_pay_card_{$originalOrderId}_{$plan->id}"])])
+            ->row([Keyboard::inlineButton(['text' => '⬅️ بازگشت به انتخاب پکیج', 'callback_data' => "renew_order_{$originalOrderId}"])]);
 
         $this->sendOrEditMessage($user->telegram_chat_id, $message, $keyboard, $messageId);
     }
@@ -3891,19 +3934,30 @@ class WebhookController extends BaseController
     /**
      * ✅ اصلاح: استفاده از & برای دسترسی به متغیرها پس از تراکنش
      */
-    protected function processRenewalWalletPayment($user, $originalOrderId, $messageId)
+    protected function processRenewalWalletPayment($user, $originalOrderId, $messageId, $renewPlanId = null)
     {
         $originalOrder = $user->orders()->with('plan')->find($originalOrderId);
-        $newRenewalOrder = null; // ✅ تعریف اولیه
-        $provisionData = null;   // ✅ تعریف اولیه
+        $newRenewalOrder = null;
+        $provisionData = null;
 
-        // بررسی‌های اولیه
-        if (!$originalOrder || !$originalOrder->plan || $originalOrder->status !== 'paid') {
+        if (!$originalOrder || $originalOrder->status !== 'paid') {
             $this->sendOrEditMainMenu($user->telegram_chat_id, "❌ سرویس مورد نظر برای تمدید یافت نشد.", $messageId);
             return;
         }
 
-        $plan = $originalOrder->plan;
+        if ($renewPlanId) {
+            $plan = Plan::where('id', $renewPlanId)->where('is_active', true)->first();
+            if (!$plan) {
+                $this->sendOrEditMainMenu($user->telegram_chat_id, "❌ پکیج انتخاب شده یافت نشد.", $messageId);
+                return;
+            }
+        } else {
+            $plan = $originalOrder->plan;
+            if (!$plan) {
+                $this->sendOrEditMainMenu($user->telegram_chat_id, "❌ پلن سرویس یافت نشد.", $messageId);
+                return;
+            }
+        }
 
         // بررسی موجودی قبل از هر کاری
         if ($user->balance < $plan->price) {
@@ -4037,14 +4091,26 @@ class WebhookController extends BaseController
     }
 
 
-    protected function handleRenewCardPayment($user, $originalOrderId, $messageId)
+    protected function handleRenewCardPayment($user, $originalOrderId, $messageId, $renewPlanId = null)
     {
         $originalOrder = $user->orders()->with('plan')->find($originalOrderId);
-        if (!$originalOrder || !$originalOrder->plan || $originalOrder->status !== 'paid') {
+        if (!$originalOrder || $originalOrder->status !== 'paid') {
             $this->sendOrEditMainMenu($user->telegram_chat_id, "❌ سرویس مورد نظر برای تمدید یافت نشد.", $messageId);
             return;
         }
-        $plan = $originalOrder->plan;
+        if ($renewPlanId) {
+            $plan = Plan::where('id', $renewPlanId)->where('is_active', true)->first();
+            if (!$plan) {
+                $this->sendOrEditMainMenu($user->telegram_chat_id, "❌ پکیج انتخاب شده یافت نشد.", $messageId);
+                return;
+            }
+        } else {
+            $plan = $originalOrder->plan;
+            if (!$plan) {
+                $this->sendOrEditMainMenu($user->telegram_chat_id, "❌ پلن سرویس یافت نشد.", $messageId);
+                return;
+            }
+        }
 
         $newRenewalOrder = $user->orders()->create([
             'plan_id' => $plan->id,

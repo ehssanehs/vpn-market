@@ -197,12 +197,9 @@
                                                 <p class="font-mono text-gray-900 dark:text-white" dir="ltr">{{ to_jalali_date($order->expires_at, 'Y/m/d', 'نامحدود') }}</p>                                            </div>
                                             <div class="text-left sm:text-right md:text-left mt-4 sm:mt-0">
                                                 <div class="flex flex-col sm:flex-row justify-end space-y-2 sm:space-y-0 sm:space-x-2 sm:space-x-reverse">
-                                                    <form method="POST" action="{{ route('order.renew', $order->id) }}">
-                                                        @csrf
-                                                        <button type="submit" class="w-full sm:w-auto px-3 py-2 bg-yellow-500 text-white text-xs rounded-lg hover:bg-yellow-600 focus:outline-none" title="تمدید سرویس">
-                                                            تمدید
-                                                        </button>
-                                                    </form>
+                                                    <button type="button" @click="$store.renewModal.open({{ $order->id }})" class="w-full sm:w-auto px-3 py-2 bg-yellow-500 text-white text-xs rounded-lg hover:bg-yellow-600 focus:outline-none" title="تمدید سرویس">
+                                                        تمدید
+                                                    </button>
                                                     @if(!empty($order->config_details))
                                                         <button @click="open = !open" class="w-full sm:w-auto px-3 py-2 bg-gray-700 text-white text-xs rounded-lg hover:bg-gray-600 focus:outline-none">
                                                             <span x-show="!open">کانفیگ</span>
@@ -556,6 +553,39 @@
         </div>
     </div>
 
+    <!-- Renew Package Selection Modal -->
+    <div x-data x-show="$store.renewModal.show" x-cloak class="fixed inset-0 z-50 overflow-y-auto">
+        <div class="flex items-center justify-center min-h-screen px-4">
+            <div class="fixed inset-0 bg-gray-500 bg-opacity-75" @click="$store.renewModal.close()"></div>
+            <div class="relative bg-white dark:bg-gray-800 rounded-xl max-w-3xl w-full p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-bold text-gray-900 dark:text-white">🔄 انتخاب پکیج تمدید</h3>
+                    <button @click="$store.renewModal.close()" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                </div>
+                <p class="text-sm text-gray-500 dark:text-gray-400 mb-4 text-right">پکیج مورد نظر برای تمدید سرویس را انتخاب کنید. مدت و حجم جدید طبق پکیج انتخابی اعمال می‌شود.</p>
+                <form :action="$store.renewModal.action" method="POST" class="space-y-4">
+                    @csrf
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[55vh] overflow-y-auto p-1">
+                        @foreach($plans as $p)
+                            <label class="relative flex flex-col p-4 rounded-xl border-2 cursor-pointer transition has-[:checked]:border-indigo-500 has-[:checked]:bg-indigo-50 dark:has-[:checked]:bg-indigo-900/20 border-gray-200 dark:border-gray-700 hover:border-indigo-300">
+                                <input type="radio" name="plan_id" value="{{ $p->id }}" class="absolute top-3 left-3" :checked="$store.renewModal.selectedPlanId == {{ $p->id }}">
+                                <span class="font-bold text-gray-900 dark:text-white text-right pr-6">{{ $p->name }}</span>
+                                <span class="text-xs text-gray-500 dark:text-gray-400 mt-1 text-right">{{ $p->volume_gb }} GB — {{ $p->duration_label }}</span>
+                                <span class="text-sm font-bold text-indigo-600 dark:text-indigo-400 mt-2 text-right">{{ number_format($p->price) }} تومان</span>
+                            </label>
+                        @endforeach
+                    </div>
+                    <div class="flex gap-3 pt-2">
+                        <button type="submit" class="flex-1 py-3 bg-yellow-500 hover:bg-yellow-600 text-white font-bold rounded-xl transition">تأیید و ادامه پرداخت</button>
+                        <button type="button" @click="$store.renewModal.close()" class="flex-1 py-3 bg-gray-200 dark:bg-gray-700 dark:text-white rounded-xl">انصراف</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
     <!-- QR Code Modal -->
     <div x-data
          x-show="$store.qrModal.show"
@@ -645,6 +675,17 @@
             }
 
             document.addEventListener('alpine:init', () => {
+                Alpine.store('renewModal', {
+                    show: false,
+                    orderId: null,
+                    selectedPlanId: null,
+                    get action() { return this.orderId ? `/order/${this.orderId}/renew` : '#'; },
+                    open(orderId) {
+                        this.orderId = orderId;
+                        this.show = true;
+                    },
+                    close() { this.show = false; this.orderId = null; }
+                });
                 Alpine.store('qrModal', {
                     show: false,
                     config: '',
