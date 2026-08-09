@@ -114,6 +114,57 @@ it('uses the original service configuration when a renewal is accepted', functio
         ->and(json_encode($payloads[0]['reply_markup']->toArray()))->toContain("copy_link_{$originalOrder->id}");
 });
 
+it('shows the renewed plan volume and details when renewing with a different plan', function () {
+    $user = User::factory()->create(['telegram_chat_id' => '987654321']);
+    $initialPlan = createTelegramNotificationPlan([
+        'name' => '10GB Starter Plan',
+        'volume_gb' => 10,
+        'duration_days' => 30,
+        'price' => 50000,
+    ]);
+    $renewedPlan = createTelegramNotificationPlan([
+        'name' => '50GB Pro Plan',
+        'volume_gb' => 50,
+        'duration_days' => 60,
+        'price' => 150000,
+    ]);
+    $config = 'https://vpn.example.test/sub/user-connection';
+
+    $originalOrder = $user->orders()->create([
+        'plan_id' => $initialPlan->id,
+        'status' => 'paid',
+        'source' => 'web',
+        'amount' => $initialPlan->price,
+        'payment_method' => 'card',
+        'config_details' => $config,
+        'panel_username' => 'test_user_volume',
+        'expires_at' => now()->addDays(60),
+    ]);
+
+    $renewalOrder = $user->orders()->create([
+        'plan_id' => $renewedPlan->id,
+        'status' => 'paid',
+        'source' => 'telegram_renewal',
+        'amount' => $renewedPlan->price,
+        'payment_method' => 'wallet',
+        'renews_order_id' => $originalOrder->id,
+    ]);
+
+    $payloads = [];
+    mockTelegramOrderMessage($payloads);
+
+    $sent = app(TelegramOrderNotificationService::class)
+        ->sendServiceActivated($renewalOrder);
+
+    expect($sent)->toBeTrue()
+        ->and($payloads[0]['text'])->toContain('تمدید سرویس')
+        ->and($payloads[0]['text'])->toContain('50GB Pro Plan')
+        ->and($payloads[0]['text'])->toContain('50 گیگابایت')
+        ->and($payloads[0]['text'])->toContain('60 روز')
+        ->and($payloads[0]['text'])->not->toContain('10GB Starter Plan')
+        ->and($payloads[0]['text'])->not->toContain('10 گیگابایت');
+});
+
 it('sends the admin rejection reason to the user safely', function () {
     $user = User::factory()->create(['telegram_chat_id' => '1122334455']);
     $plan = createTelegramNotificationPlan(['name' => 'Monthly & Fast']);

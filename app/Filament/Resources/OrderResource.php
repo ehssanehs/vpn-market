@@ -388,7 +388,8 @@ class OrderResource extends Resource
                                     'expires_at' => $newExpiresAt,
                                     'panel_username' => $uniqueUsername,
                                     'panel_client_id' => $finalUuid,
-                                    'panel_sub_id' => $finalSubId
+                                    'panel_sub_id' => $finalSubId,
+                                    'plan_id' => $plan->id,
                                 ];
 
                                 if($isRenewal) {
