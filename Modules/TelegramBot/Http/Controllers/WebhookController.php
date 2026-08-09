@@ -3966,13 +3966,15 @@ class WebhookController extends BaseController
         }
 
         $balance = $user->balance ?? 0;
-        $expiresAt = $originalOrder->expires_at ? Carbon::parse($originalOrder->expires_at) : now();
+        // تاریخ انقضای جدید پس از تمدید، دقیقاً برابر با مدت پکیج انتخابی از لحظه تمدید است
+        $newExpiresAt = now()->addDays($plan->duration_days);
 
         $message = "🔄 *تایید تمدید سرویس*\n\n";
         $message .= "▫️ سرویس فعلی: *{$this->escape($originalOrder->plan ? $originalOrder->plan->name : '—')}*\n";
         $message .= "▫️ پکیج تمدید: *{$this->escape($plan->name)}* ({$plan->volume_gb}GB / {$plan->duration_days} روز)\n";
         $message .= "▫️ هزینه تمدید: *" . number_format($plan->price) . " تومان*\n";
-        $message .= "▫️ موجودی کیف پول: *" . number_format($balance) . " تومان*\n\n";
+        $message .= "▫️ موجودی کیف پول: *" . number_format($balance) . " تومان*\n";
+        $message .= "▫️ اعتبار جدید پس از تمدید: *{$this->escape(to_jalali_date($newExpiresAt, 'Y/m/d'))}* ({$plan->duration_days} روز از امروز)\n\n";
         $message .= "لطفاً روش پرداخت برای تمدید را انتخاب کنید:";
 
         $keyboard = Keyboard::make()->inline();
@@ -4198,9 +4200,10 @@ class WebhookController extends BaseController
             FILTER_VALIDATE_BOOLEAN
         );
 
-        $currentExpiresAt = Carbon::parse($originalOrder->expires_at);
-        $baseDate = $currentExpiresAt->isPast() ? now() : $currentExpiresAt;
-        $newExpiryDate = $baseDate->copy()->addDays($plan->duration_days);
+        // ✅ تاریخ و اعتبار اشتراک پس از تمدید دقیقاً برابر با پکیج انتخابی است:
+        // همان‌طور که حجم ترافیک با مقدار پکیج جایگزین می‌شود، تاریخ انقضای جدید نیز
+        // از لحظه تمدید به‌مدت پکیج انتخابی محاسبه می‌شود (بدون اضافه شدن روزهای باقی‌مانده).
+        $newExpiryDate = now()->addDays($plan->duration_days);
 
         $isMultiServer = false;
         $panelType = $settings->get('panel_type');
@@ -5291,16 +5294,10 @@ class WebhookController extends BaseController
                     : ($order->panel_username ?? ClientNamingService::generate($user->id, $isRenewal ? $originalOrder->id : $order->id));
                 $uniqueUsername = trim($uniqueUsername);
 
-                if ($isRenewal) {
-                    // اگر سرویس منقضی شده باشد، تمدید از امروز حساب می‌شود (مثل مسیر کیف پول)
-                    $baseDate = $originalOrder->expires_at ? Carbon::parse($originalOrder->expires_at) : now();
-                    if ($baseDate->isPast()) {
-                        $baseDate = now();
-                    }
-                    $newExpiresAt = $baseDate->addDays($plan->duration_days);
-                } else {
-                    $newExpiresAt = now()->addDays($plan->duration_days);
-                }
+                // ✅ چه خرید جدید چه تمدید: تاریخ انقضای جدید از لحظه فعال‌سازی به‌مدت
+                // پکیج انتخابی محاسبه می‌شود تا روزهای اعتبار اشتراک دقیقاً برابر با
+                // بسته باشد (مثل حجم ترافیک که با مقدار پکیج جایگزین می‌شود).
+                $newExpiresAt = now()->addDays($plan->duration_days);
 
                 // Determine panel/server
                 $panelType = Setting::normalizeValue($settings->get('panel_type'));
