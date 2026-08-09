@@ -128,4 +128,14 @@ class Order extends Model
     {
         return $this->hasMany(Transaction::class);
     }
+
+    public function renewals()
+    {
+        return $this->hasMany(Order::class, 'renews_order_id');
+    }
+
+    public function renewedOrder()
+    {
+        return $this->belongsTo(Order::class, 'renews_order_id');
+    }
 }

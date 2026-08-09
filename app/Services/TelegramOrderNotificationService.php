@@ -72,7 +72,7 @@ class TelegramOrderNotificationService
                 return false;
             }
 
-            $plan = $serviceOrder->plan ?: $paymentOrder->plan;
+            $plan = $paymentOrder->plan ?: $serviceOrder->plan;
             $server = null;
             $location = null;
 

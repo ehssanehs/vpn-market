@@ -3138,6 +3138,20 @@ class WebhookController extends BaseController
             return;
         }
 
+        // If this order has completed renewal orders with a newer plan, ensure we display the latest active plan
+        $latestRenewal = Order::where('renews_order_id', $order->id)
+            ->where('status', 'paid')
+            ->whereNotNull('plan_id')
+            ->latest('id')
+            ->first();
+
+        if ($latestRenewal && $latestRenewal->plan_id && $order->plan_id !== $latestRenewal->plan_id) {
+            $order->update(['plan_id' => $latestRenewal->plan_id]);
+            $order->load('plan');
+        }
+
+        $activePlan = ($latestRenewal && $latestRenewal->plan) ? $latestRenewal->plan : $order->plan;
+
         $panelUsername = $order->panel_username;
         if (empty($panelUsername)) {
             $panelUsername = $order->panel_username ?? \App\Services\ClientNamingService::generate($user->id, $order->id);
@@ -3187,11 +3201,11 @@ class WebhookController extends BaseController
         }
 
         // Build traffic display – for imported show remaining/used/total from live panel data
-        if ($order->plan && !$order->is_imported) {
-            $planName = $order->plan->name;
-            $volumeText = $order->plan->volume_gb . ' گیگابایت';
+        if ($activePlan && !$order->is_imported) {
+            $planName = $activePlan->name;
+            $volumeText = $activePlan->volume_gb . ' گیگابایت';
         } elseif ($order->is_imported) {
-            $planName = $order->plan ? $order->plan->name . ' (واردشده 📥)' : 'اشتراک واردشده 📥';
+            $planName = $activePlan ? $activePlan->name . ' (واردشده 📥)' : 'اشتراک واردشده 📥';
             $importMeta = $order->import_meta ?? [];
             $totalBytes = $importMeta['totalGB'] ?? $importMeta['data_limit'] ?? 0;
             $usedBytes = $importMeta['used_traffic'] ?? 0;
@@ -3210,8 +3224,8 @@ class WebhookController extends BaseController
                 $volumeText = $usedGB > 0 ? "نامحدود (مصرف: {$usedGB} GB)" : "نامحدود ♾️";
             }
         } else {
-            $planName = $order->plan->name;
-            $volumeText = $order->plan->volume_gb . ' گیگابایت';
+            $planName = $activePlan ? $activePlan->name : ($order->plan ? $order->plan->name : 'سرویس');
+            $volumeText = $activePlan ? ($activePlan->volume_gb . ' گیگابایت') : ($order->plan ? ($order->plan->volume_gb . ' گیگابایت') : 'نامشخص');
         }
 
         $message = "🔍 جزئیات سرویس \#{$order->id}\n\n";
@@ -3236,7 +3250,7 @@ class WebhookController extends BaseController
 
         // Renewal requires a plan (pricing/duration), so it is only offered when
         // the imported subscription actually matched an active plan.
-        if ($order->plan) {
+        if ($activePlan || $order->plan) {
             $keyboard->row([
                 Keyboard::inlineButton(['text' => "🔄 تمدید سرویس", 'callback_data' => "renew_order_{$order->id}"])
             ]);
@@ -3937,7 +3951,13 @@ class WebhookController extends BaseController
             return;
         }
 
-        $currentPlanName = $originalOrder->plan ? $originalOrder->plan->name : 'نامشخص';
+        $latestRenewal = Order::where('renews_order_id', $originalOrder->id)
+            ->where('status', 'paid')
+            ->whereNotNull('plan_id')
+            ->latest('id')
+            ->first();
+        $activePlan = ($latestRenewal && $latestRenewal->plan) ? $latestRenewal->plan : $originalOrder->plan;
+        $currentPlanName = $activePlan ? $activePlan->name : 'نامشخص';
         $message = "🔄 *انتخاب پکیج تمدید*\n\n";
         $message .= "سرویس فعلی: *{$this->escape($currentPlanName)}*\n";
         if ($originalOrder->expires_at) {
@@ -4274,7 +4294,10 @@ class WebhookController extends BaseController
                 }
 
                 if ($updateResponse !== null && (isset($updateResponse['username']) || isset($updateResponse['subscription_url']))) {
-                    $originalOrder->update(['expires_at' => $newExpiryDate]);
+                    $originalOrder->update([
+                        'expires_at' => $newExpiryDate,
+                        'plan_id' => $plan->id,
+                    ]);
                     return [
                         'link' => $originalOrder->config_details,
                         'username' => $uniqueUsername
@@ -4316,7 +4339,11 @@ class WebhookController extends BaseController
                 if ($recreated) {
                     // کاربر از نو ساخته شد؛ لینک سابسکریپشن جدید را ذخیره کن
                     $newLink = $marzban->generateSubscriptionLink($updateResponse) ?: $originalOrder->config_details;
-                    $originalOrder->update(['expires_at' => $newExpiryDate, 'config_details' => $newLink]);
+                    $originalOrder->update([
+                        'expires_at' => $newExpiryDate,
+                        'config_details' => $newLink,
+                        'plan_id' => $plan->id,
+                    ]);
                     return [
                         'link' => $newLink,
                         'username' => $uniqueUsername
@@ -4331,7 +4358,10 @@ class WebhookController extends BaseController
                     Log::warning("Marzban traffic reset FAILED after renewal for user: $uniqueUsername");
                 }
 
-                $originalOrder->update(['expires_at' => $newExpiryDate]);
+                $originalOrder->update([
+                    'expires_at' => $newExpiryDate,
+                    'plan_id' => $plan->id,
+                ]);
                 return [
                     'link' => $originalOrder->config_details,
                     'username' => $uniqueUsername
@@ -4404,7 +4434,10 @@ class WebhookController extends BaseController
                         Log::warning("Traffic reset FAILED for user: $uniqueUsername");
                     }
 
-                    $originalOrder->update(['expires_at' => $newExpiryDate]);
+                    $originalOrder->update([
+                        'expires_at' => $newExpiryDate,
+                        'plan_id' => $plan->id,
+                    ]);
                     return [
                         'link' => $originalOrder->config_details,
                         'username' => $uniqueUsername
@@ -5497,7 +5530,14 @@ class WebhookController extends BaseController
                 if (!$success) throw new \Exception('خطای ناشناخته در فعال‌سازی');
 
                 // Save
-                $dataToUpdate = ['config_details' => $finalConfig, 'expires_at' => $newExpiresAt, 'panel_username' => $uniqueUsername, 'panel_client_id' => $finalUuid, 'panel_sub_id' => $finalSubId];
+                $dataToUpdate = [
+                    'config_details' => $finalConfig,
+                    'expires_at' => $newExpiresAt,
+                    'panel_username' => $uniqueUsername,
+                    'panel_client_id' => $finalUuid,
+                    'panel_sub_id' => $finalSubId,
+                    'plan_id' => $plan->id,
+                ];
                 if ($isRenewal) {
                     $originalOrder->update($dataToUpdate);
                 } else {

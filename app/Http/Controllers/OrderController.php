@@ -900,7 +900,8 @@ class OrderController extends Controller
                 if ($isRenewal) {
                     $originalOrder->update([
                         'config_details' => $finalConfig,
-                        'expires_at' => $newExpiresAt->format('Y-m-d H:i:s')
+                        'expires_at' => $newExpiresAt->format('Y-m-d H:i:s'),
+                        'plan_id' => $plan->id,
                     ]);
 
                     $user->update(['show_renewal_notification' => true]);
@@ -908,7 +909,7 @@ class OrderController extends Controller
                     $user->notifications()->create([
                         'type' => 'service_renewed',
                         'title' => 'سرویس شما تمدید شد!',
-                        'message' => "سرویس {$originalOrder->plan->name} با موفقیت تمدید شد.",
+                        'message' => "سرویس {$plan->name} با موفقیت تمدید شد.",
                         'link' => route('dashboard', ['tab' => 'my_services']),
                     ]);
                 } else {
